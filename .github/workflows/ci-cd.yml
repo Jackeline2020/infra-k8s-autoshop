@@ -143,6 +143,16 @@ jobs:
           fi
           sed -i "s#DB_HOST_PLACEHOLDER#${DB_HOST}#" k8s/overlays/aws/configmap.yaml
 
+      - name: Injetar o JWT_SECRET no Secret
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          if [ -z "$JWT_SECRET" ]; then
+            echo "Secret JWT_SECRET não configurado — veja infra/README.md" >&2
+            exit 1
+          fi
+          sed -i "s#JWT_SECRET_PLACEHOLDER#${JWT_SECRET}#" k8s/overlays/aws/secret.yaml
+
       - name: Aplicar manifestos no cluster (Deployment, Service, HPA, ConfigMap/Secret)
         run: kubectl apply -k k8s/overlays/aws
 
