@@ -28,9 +28,9 @@ jobs:
   # existia no monorepo, só que agora reage a um evento vindo de outro
   # repositório em vez de rodar no push do próprio código da aplicação.
   deploy-local:
-    name: Deploy (K8s + Banco)
+    name: Deploy Homologação (kind efêmero, smoke test)
     needs: terraform-validate
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch' || github.event.client_payload.environment == 'homolog'
     runs-on: ubuntu-latest
     env:
       TF_VAR_image: ${{ github.event.client_payload.image || github.event.inputs.image }}
@@ -87,9 +87,9 @@ jobs:
   # Deploy no cluster EKS real — desligado por padrão (variável de
   # repositório AWS_DEPLOY_ENABLED).
   deploy-aws:
-    name: Deploy AWS (desligado)
+    name: Deploy Produção (EKS real)
     needs: terraform-validate
-    if: github.event_name != 'pull_request' && vars.AWS_DEPLOY_ENABLED == 'true'
+    if: (github.event_name == 'workflow_dispatch' || github.event.client_payload.environment == 'production') && vars.AWS_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -142,6 +142,16 @@ jobs:
             exit 1
           fi
           sed -i "s#DB_HOST_PLACEHOLDER#${DB_HOST}#" k8s/overlays/aws/configmap.yaml
+
+      - name: Injetar o JWT_SECRET no Secret
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          if [ -z "$JWT_SECRET" ]; then
+            echo "Secret JWT_SECRET não configurado — veja infra/README.md" >&2
+            exit 1
+          fi
+          sed -i "s#JWT_SECRET_PLACEHOLDER#${JWT_SECRET}#" k8s/overlays/aws/secret.yaml
 
       - name: Aplicar manifestos no cluster (Deployment, Service, HPA, ConfigMap/Secret)
         run: kubectl apply -k k8s/overlays/aws
