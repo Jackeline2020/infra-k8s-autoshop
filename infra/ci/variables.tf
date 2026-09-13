@@ -13,3 +13,9 @@ variable "ghcr_token" {
   type        = string
   sensitive   = true
 }
+
+variable "migration_sql" {
+  description = "Conteúdo do arquivo migrations/000001_init_schema.up.sql, que mora no repositório app-autoshop. O workflow (ci-cd.yml) baixa esse arquivo via API do GitHub e passa aqui via TF_VAR_migration_sql antes do apply — não dá pra usar file() porque o arquivo não existe neste repositório."
+  type        = string
+  sensitive   = true
+}

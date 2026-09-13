@@ -73,7 +73,7 @@ resource "kubectl_manifest" "db_migration_sql" {
       namespace = "autoshop"
     }
     data = {
-      "000001_init_schema.up.sql" = file("${path.module}/../../migrations/000001_init_schema.up.sql")
+      "000001_init_schema.up.sql" = var.migration_sql
     }
   })
   depends_on = [kubectl_manifest.namespace]
