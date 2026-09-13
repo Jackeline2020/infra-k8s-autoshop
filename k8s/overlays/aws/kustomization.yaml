@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Adiado pra próxima fase (ver infra/README.md): quando a AWS real entrar,
+# o ideal é o namespace também virar kubectl_manifest do Terraform em
+# infra/aws, igual foi feito em infra/local e infra/ci. Por enquanto, como
+# esse overlay não é aplicado nesta fase, o namespace.yaml continua listado
+# aqui pra esse caminho não ficar quebrado.
+resources:
+  - ../../base
+  - ../../base/namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - serviceaccount.yaml
