@@ -27,33 +27,45 @@ resource "time_sleep" "wait_for_cluster" {
 }
 
 # --- Namespace ---
+# Único manifesto de "ambiente" que continua pertencendo a este repositório
+# (não ao app-autoshop) — é infraestrutura do cluster, não da aplicação.
 resource "kubectl_manifest" "namespace" {
-  yaml_body  = file("${path.module}/../../k8s/base/namespace.yaml")
+  yaml_body = yamlencode({
+    apiVersion = "v1"
+    kind       = "Namespace"
+    metadata   = { name = "autoshop" }
+  })
   depends_on = [time_sleep.wait_for_cluster]
 }
 
 # --- Config e Secret da aplicação ---
-# Vem antes do banco agora porque o Deployment do Postgres lê usuário/senha
-# do próprio ConfigMap/Secret (POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB).
+# Conteúdo vem de k8s/overlays/local/{configmap,secret,serviceaccount}.yaml
+# do repositório app-autoshop (var.*_yaml, ver variables.tf) — desde a
+# reorganização pedida pelo professor, esses manifestos são versionados lá,
+# não aqui. Este repositório só cuida do cluster em si.
 resource "kubectl_manifest" "configmap" {
-  yaml_body  = file("${path.module}/../../k8s/overlays/local/configmap.yaml")
+  yaml_body  = var.configmap_yaml
   depends_on = [kubectl_manifest.namespace]
 }
 
 resource "kubectl_manifest" "secret" {
-  yaml_body  = file("${path.module}/../../k8s/overlays/local/secret.yaml")
+  yaml_body  = var.secret_yaml
   depends_on = [kubectl_manifest.namespace]
 }
 
 resource "kubectl_manifest" "serviceaccount" {
-  yaml_body  = file("${path.module}/../../k8s/overlays/local/serviceaccount.yaml")
+  yaml_body  = var.serviceaccount_yaml
   depends_on = [kubectl_manifest.namespace]
 }
 
 # --- Banco de dados ---
-# Postgres roda dentro do cluster (Deployment + Service).
+# Postgres roda dentro do cluster (Deployment + Service) só como um
+# substituto descartável do RDS real, pra testar localmente sem depender de
+# AWS. Esse manifesto (postgres-local.yaml) é o único que continua morando
+# neste repositório de propósito: não é a aplicação, é infraestrutura de
+# teste do próprio ambiente kind.
 data "kubectl_file_documents" "postgres_local" {
-  content = file("${path.module}/../../k8s/overlays/local/postgres-local.yaml")
+  content = file("${path.module}/postgres-local.yaml")
 }
 
 resource "kubectl_manifest" "postgres_local" {
@@ -63,7 +75,8 @@ resource "kubectl_manifest" "postgres_local" {
 }
 
 # ConfigMap com o SQL da migration — mesma fonte usada em dev (docker-compose)
-# e nos testes de integração, ver migrations/000001_init_schema.up.sql.
+# e nos testes de integração, ver migrations/000001_init_schema.up.sql no
+# repositório app-autoshop.
 resource "kubectl_manifest" "db_migration_sql" {
   yaml_body = yamlencode({
     apiVersion = "v1"
@@ -73,7 +86,8 @@ resource "kubectl_manifest" "db_migration_sql" {
       namespace = "autoshop"
     }
     data = {
-      "000001_init_schema.up.sql" = var.migration_sql
+      "000001_init_schema.up.sql"          = var.migration_sql
+      "000002_add_customer_status.up.sql"  = var.migration_sql_2
     }
   })
   depends_on = [kubectl_manifest.namespace]
@@ -105,7 +119,7 @@ resource "kubectl_manifest" "db_migrate" {
             ]
             command = ["/bin/sh", "-c"]
             args = [
-              "until pg_isready -h \"$DB_HOST\" -p \"$DB_PORT\" -U \"$DB_USER\"; do sleep 2; done && PGPASSWORD=\"$DB_PASSWORD\" psql -h \"$DB_HOST\" -p \"$DB_PORT\" -U \"$DB_USER\" -d \"$DB_NAME\" -f /migrations/000001_init_schema.up.sql"
+              "until pg_isready -h \"$DB_HOST\" -p \"$DB_PORT\" -U \"$DB_USER\"; do sleep 2; done && for f in /migrations/*.sql; do PGPASSWORD=\"$DB_PASSWORD\" psql -h \"$DB_HOST\" -p \"$DB_PORT\" -U \"$DB_USER\" -d \"$DB_NAME\" -f \"$f\"; done"
             ]
             volumeMounts = [{
               name      = "migrations"
@@ -143,8 +157,9 @@ resource "helm_release" "metrics_server" {
 }
 
 # --- Aplicação ---
+# Conteúdo vem de k8s/base/{deployment,service,hpa}.yaml do app-autoshop.
 resource "kubectl_manifest" "deployment" {
-  yaml_body = file("${path.module}/../../k8s/base/deployment.yaml")
+  yaml_body = var.deployment_yaml
   # O provider tem um timeout fixo de 10min pra criar o recurso, e por padrão
   # usa esse mesmo prazo pra esperar o rollout ficar 100% disponível. Se o
   # pod demorar mais que isso pra ficar pronto, o apply falha mesmo que o
@@ -160,11 +175,11 @@ resource "kubectl_manifest" "deployment" {
 }
 
 resource "kubectl_manifest" "service" {
-  yaml_body  = file("${path.module}/../../k8s/base/service.yaml")
+  yaml_body  = var.service_yaml
   depends_on = [kubectl_manifest.namespace]
 }
 
 resource "kubectl_manifest" "hpa" {
-  yaml_body  = file("${path.module}/../../k8s/base/hpa.yaml")
+  yaml_body  = var.hpa_yaml
   depends_on = [kubectl_manifest.deployment, helm_release.metrics_server]
 }
