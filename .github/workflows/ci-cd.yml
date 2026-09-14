@@ -129,6 +129,21 @@ jobs:
           KUBECONFIG_PATH=$(terraform output -raw kubeconfig_path)
           kubectl rollout status deployment/autoshop-api -n autoshop --timeout=300s --kubeconfig "$KUBECONFIG_PATH"
 
+      - name: Diagnóstico do Deployment (só roda se o rollout falhar)
+        if: failure()
+        run: |
+          KUBECONFIG_PATH=$(terraform output -raw kubeconfig_path)
+          echo "--- pods ---"
+          kubectl get pods -n autoshop -o wide --kubeconfig "$KUBECONFIG_PATH"
+          echo "--- describe deployment ---"
+          kubectl describe deployment/autoshop-api -n autoshop --kubeconfig "$KUBECONFIG_PATH"
+          echo "--- describe pods ---"
+          kubectl describe pods -n autoshop -l app=autoshop-api --kubeconfig "$KUBECONFIG_PATH"
+          echo "--- logs (container atual) ---"
+          kubectl logs -n autoshop -l app=autoshop-api --all-containers --tail=200 --kubeconfig "$KUBECONFIG_PATH" || true
+          echo "--- logs (container anterior, caso tenha reiniciado) ---"
+          kubectl logs -n autoshop -l app=autoshop-api --all-containers --tail=200 --previous --kubeconfig "$KUBECONFIG_PATH" || true
+          
       - name: Smoke test — health check
         run: |
           for i in $(seq 1 10); do
