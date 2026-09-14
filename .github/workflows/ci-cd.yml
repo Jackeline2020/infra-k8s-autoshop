@@ -27,6 +27,15 @@ jobs:
   # Cluster kind efêmero dentro do próprio runner — mesma lógica que já
   # existia no monorepo, só que agora reage a um evento vindo de outro
   # repositório em vez de rodar no push do próprio código da aplicação.
+  #
+  # Desde a reorganização pedida pelo professor, os manifestos da aplicação
+  # (Deployment, Service, HPA, ConfigMap, Secret, ServiceAccount) passaram a
+  # ser versionados no repositório app-autoshop, não aqui. Como esse cluster
+  # é efêmero e só existe dentro deste job (não dá pra outro repositório
+  # alcançá-lo depois), este job baixa o conteúdo desses arquivos via API do
+  # GitHub e aplica dentro do próprio teste — os arquivos continuam
+  # pertencendo ao app-autoshop, este repositório só os consome como leitura
+  # pra este teste passageiro.
   deploy-local:
     name: Deploy Homologação (kind efêmero, smoke test)
     needs: terraform-validate
@@ -46,7 +55,7 @@ jobs:
         with:
           terraform_version: "~1.9"
 
-      - name: Baixar o schema de migration do repositório app
+      - name: Baixar os schemas de migration do repositório app
         env:
           TOKEN: ${{ secrets.APP_REPO_READ_TOKEN }}
         run: |
@@ -54,14 +63,49 @@ jobs:
             echo "Secret APP_REPO_READ_TOKEN não configurado — veja infra/README.md" >&2
             exit 1
           fi
-          curl -sfL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github.raw" \
-            "https://api.github.com/repos/Jackeline2020/app-autoshop/contents/migrations/000001_init_schema.up.sql" \
-            -o /tmp/migration.sql
-          {
-            echo "TF_VAR_migration_sql<<MIGRATION_EOF"
-            cat /tmp/migration.sql
-            echo "MIGRATION_EOF"
-          } >> "$GITHUB_ENV"
+          declare -A MIGRATIONS=(
+            [migration_sql]="migrations/000001_init_schema.up.sql"
+            [migration_sql_2]="migrations/000002_add_customer_status.up.sql"
+          )
+          for VAR in "${!MIGRATIONS[@]}"; do
+            REPO_PATH="${MIGRATIONS[$VAR]}"
+            curl -sfL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github.raw" \
+              "https://api.github.com/repos/Jackeline2020/app-autoshop/contents/${REPO_PATH}" \
+              -o /tmp/"${VAR}".sql
+            {
+              echo "TF_VAR_${VAR}<<EOF_${VAR}"
+              cat /tmp/"${VAR}".sql
+              echo "EOF_${VAR}"
+            } >> "$GITHUB_ENV"
+          done
+
+      - name: Baixar os manifestos Kubernetes do repositório app
+        env:
+          TOKEN: ${{ secrets.APP_REPO_READ_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "Secret APP_REPO_READ_TOKEN não configurado — veja infra/README.md" >&2
+            exit 1
+          fi
+          declare -A FILES=(
+            [deployment_yaml]="k8s/base/deployment.yaml"
+            [service_yaml]="k8s/base/service.yaml"
+            [hpa_yaml]="k8s/base/hpa.yaml"
+            [configmap_yaml]="k8s/overlays/local/configmap.yaml"
+            [secret_yaml]="k8s/overlays/local/secret.yaml"
+            [serviceaccount_yaml]="k8s/overlays/local/serviceaccount.yaml"
+          )
+          for VAR in "${!FILES[@]}"; do
+            REPO_PATH="${FILES[$VAR]}"
+            curl -sfL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github.raw" \
+              "https://api.github.com/repos/Jackeline2020/app-autoshop/contents/${REPO_PATH}" \
+              -o /tmp/"${VAR}".yaml
+            {
+              echo "TF_VAR_${VAR}<<EOF_${VAR}"
+              cat /tmp/"${VAR}".yaml
+              echo "EOF_${VAR}"
+            } >> "$GITHUB_ENV"
+          done
 
       - name: Terraform init
         run: terraform init
@@ -101,10 +145,18 @@ jobs:
         continue-on-error: true
         run: terraform destroy -auto-approve
 
-  # Deploy no cluster EKS real — desligado por padrão (variável de
-  # repositório AWS_DEPLOY_ENABLED).
+  # Provisiona (ou atualiza) o cluster EKS real — desligado por padrão
+  # (variável de repositório AWS_DEPLOY_ENABLED). Desde a reorganização
+  # pedida pelo professor, este job cuida SÓ da infraestrutura do cluster
+  # (Terraform de infra/aws: cluster, node groups, rede, add-ons via IRSA).
+  # A aplicação dos manifestos da aplicação (Deployment, Service, HPA,
+  # ConfigMap, Secret) no cluster real não acontece mais aqui — passou a
+  # ser responsabilidade do próprio repositório app-autoshop, que se
+  # autentica de forma independente e aplica seus próprios manifestos,
+  # exatamente como pedido: "separar o ciclo de vida da infraestrutura do
+  # ciclo de vida da aplicação".
   deploy-aws:
-    name: Deploy Produção (EKS real)
+    name: Provisionar Cluster EKS (Produção)
     needs: terraform-validate
     if: (github.event_name == 'workflow_dispatch' || github.event.client_payload.environment == 'production') && vars.AWS_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
@@ -112,12 +164,17 @@ jobs:
       contents: read
       id-token: write
     env:
-      KUSTOMIZE_VERSION: v5.8.1
       AWS_REGION: us-east-1
-      EKS_CLUSTER_NAME: autoshop-eks
-      IMAGE: ${{ github.event.client_payload.image || github.event.inputs.image }}
+      TF_VAR_rds_secret_arn: ${{ secrets.RDS_SECRET_ARN }}
+    defaults:
+      run:
+        working-directory: infra/aws
     steps:
       - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
 
       - name: Configurar credenciais AWS via OIDC (sem chave fixa)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
@@ -125,53 +182,8 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Apontar kubectl para o cluster EKS
-        run: aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+      - name: Terraform init
+        run: terraform init
 
-      - name: Instalar kustomize (binário oficial, com verificação de checksum)
-        run: |
-          curl --proto '=https' --tlsv1.2 -sLO "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
-          curl --proto '=https' --tlsv1.2 -sLO "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/checksums.txt"
-          sha256sum --ignore-missing -c checksums.txt
-          tar -xzf "kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
-          sudo mv kustomize /usr/local/bin/
-
-      - name: Definir a imagem publicada pelo repositório app
-        working-directory: k8s/overlays/aws
-        run: kustomize edit set image autoshop-api=${{ env.IMAGE }}
-
-      - name: Injetar a IRSA role na service account
-        env:
-          IRSA_ROLE_ARN: ${{ secrets.IRSA_ROLE_ARN }}
-        run: |
-          if [ -z "$IRSA_ROLE_ARN" ]; then
-            echo "Secret IRSA_ROLE_ARN não configurado — veja infra/README.md" >&2
-            exit 1
-          fi
-          sed -i "s#IRSA_ROLE_ARN_PLACEHOLDER#${IRSA_ROLE_ARN}#" k8s/overlays/aws/serviceaccount.yaml
-
-      - name: Injetar o endpoint do RDS no ConfigMap
-        env:
-          DB_HOST: ${{ secrets.DB_HOST }}
-        run: |
-          if [ -z "$DB_HOST" ]; then
-            echo "Secret DB_HOST não configurado — copie o output rds_endpoint do infra-db, veja infra/README.md" >&2
-            exit 1
-          fi
-          sed -i "s#DB_HOST_PLACEHOLDER#${DB_HOST}#" k8s/overlays/aws/configmap.yaml
-
-      - name: Injetar o JWT_SECRET no Secret
-        env:
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-        run: |
-          if [ -z "$JWT_SECRET" ]; then
-            echo "Secret JWT_SECRET não configurado — veja infra/README.md" >&2
-            exit 1
-          fi
-          sed -i "s#JWT_SECRET_PLACEHOLDER#${JWT_SECRET}#" k8s/overlays/aws/secret.yaml
-
-      - name: Aplicar manifestos no cluster (Deployment, Service, HPA, ConfigMap/Secret)
-        run: kubectl apply -k k8s/overlays/aws
-
-      - name: Aguardar o rollout concluir
-        run: kubectl rollout status deployment/autoshop-api -n autoshop --timeout=180s
+      - name: Terraform apply (cluster EKS, node groups, rede, add-ons)
+        run: terraform apply -auto-approve

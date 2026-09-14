@@ -30,8 +30,14 @@ resource "time_sleep" "wait_for_cluster" {
 }
 
 # --- Namespace ---
+# Único manifesto de "ambiente" que continua pertencendo a este repositório
+# (não ao app-autoshop) — é infraestrutura do cluster, não da aplicação.
 resource "kubectl_manifest" "namespace" {
-  yaml_body  = file("${path.module}/../../k8s/base/namespace.yaml")
+  yaml_body = yamlencode({
+    apiVersion = "v1"
+    kind       = "Namespace"
+    metadata   = { name = "autoshop" }
+  })
   depends_on = [time_sleep.wait_for_cluster]
 }
 
@@ -64,24 +70,30 @@ resource "kubectl_manifest" "ghcr_pull_secret" {
 }
 
 # --- Config e Secret da aplicação ---
+# Conteúdo vem de k8s/overlays/local/{configmap,secret,serviceaccount}.yaml
+# do repositório app-autoshop, baixado pelo workflow via API do GitHub (ver
+# .github/workflows/ci-cd.yml) — desde a reorganização pedida pelo
+# professor, esses manifestos são versionados lá, não aqui.
 resource "kubectl_manifest" "configmap" {
-  yaml_body  = file("${path.module}/../../k8s/overlays/local/configmap.yaml")
+  yaml_body  = var.configmap_yaml
   depends_on = [kubectl_manifest.namespace]
 }
 
 resource "kubectl_manifest" "secret" {
-  yaml_body  = file("${path.module}/../../k8s/overlays/local/secret.yaml")
+  yaml_body  = var.secret_yaml
   depends_on = [kubectl_manifest.namespace]
 }
 
 resource "kubectl_manifest" "serviceaccount" {
-  yaml_body  = file("${path.module}/../../k8s/overlays/local/serviceaccount.yaml")
+  yaml_body  = var.serviceaccount_yaml
   depends_on = [kubectl_manifest.namespace, kubectl_manifest.ghcr_pull_secret]
 }
 
 # --- Banco de dados: Postgres dentro do cluster ---
+# Substituto descartável do RDS real, só pra este teste efêmero — não é a
+# aplicação, é infraestrutura de teste do próprio ambiente kind.
 data "kubectl_file_documents" "postgres_local" {
-  content = file("${path.module}/../../k8s/overlays/local/postgres-local.yaml")
+  content = file("${path.module}/postgres-local.yaml")
 }
 
 resource "kubectl_manifest" "postgres_local" {
@@ -99,7 +111,8 @@ resource "kubectl_manifest" "db_migration_sql" {
       namespace = "autoshop"
     }
     data = {
-      "000001_init_schema.up.sql" = var.migration_sql
+      "000001_init_schema.up.sql"          = var.migration_sql
+      "000002_add_customer_status.up.sql"  = var.migration_sql_2
     }
   })
   depends_on = [kubectl_manifest.namespace]
@@ -128,7 +141,7 @@ resource "kubectl_manifest" "db_migrate" {
             ]
             command = ["/bin/sh", "-c"]
             args = [
-              "until pg_isready -h \"$DB_HOST\" -p \"$DB_PORT\" -U \"$DB_USER\"; do sleep 2; done && PGPASSWORD=\"$DB_PASSWORD\" psql -h \"$DB_HOST\" -p \"$DB_PORT\" -U \"$DB_USER\" -d \"$DB_NAME\" -f /migrations/000001_init_schema.up.sql"
+              "until pg_isready -h \"$DB_HOST\" -p \"$DB_PORT\" -U \"$DB_USER\"; do sleep 2; done && for f in /migrations/*.sql; do PGPASSWORD=\"$DB_PASSWORD\" psql -h \"$DB_HOST\" -p \"$DB_PORT\" -U \"$DB_USER\" -d \"$DB_NAME\" -f \"$f\"; done"
             ]
             volumeMounts = [{
               name      = "migrations"
@@ -149,11 +162,12 @@ resource "kubectl_manifest" "db_migrate" {
 }
 
 # --- Aplicação ---
+# Conteúdo vem de k8s/base/{deployment,service,hpa}.yaml do app-autoshop.
 # Troca a tag padrão do manifesto (autoshop-api:latest) pela imagem recém
 # publicada nesta execução do pipeline (ghcr.io/.../autoshop-api:<sha>).
 resource "kubectl_manifest" "deployment" {
   yaml_body = replace(
-    file("${path.module}/../../k8s/base/deployment.yaml"),
+    var.deployment_yaml,
     "image: autoshop-api:latest",
     "image: ${var.image}"
   )
@@ -167,11 +181,11 @@ resource "kubectl_manifest" "deployment" {
 }
 
 resource "kubectl_manifest" "service" {
-  yaml_body  = file("${path.module}/../../k8s/base/service.yaml")
+  yaml_body  = var.service_yaml
   depends_on = [kubectl_manifest.namespace]
 }
 
 resource "kubectl_manifest" "hpa" {
-  yaml_body  = file("${path.module}/../../k8s/base/hpa.yaml")
+  yaml_body  = var.hpa_yaml
   depends_on = [kubectl_manifest.deployment]
 }

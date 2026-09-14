@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-local
+  namespace: autoshop
+  labels:
+    app: postgres-local
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-local
+  template:
+    metadata:
+      labels:
+        app: postgres-local
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: autoshop-config
+                  key: DB_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: autoshop-config
+                  key: DB_NAME
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: autoshop-secrets
+                  key: DB_PASSWORD
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          # cluster efêmero (kind local/CI) — sem volume persistente de propósito
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 256Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-local
+  namespace: autoshop
+spec:
+  selector:
+    app: postgres-local
+  ports:
+    - port: 5432
+      targetPort: 5432
