@@ -53,7 +53,7 @@ flowchart TB
   de forma totalmente independente (via `kubectl apply` autenticado com a
   mesma role compartilhada via OIDC).
 
-Mais detalhes técnicos de cada pasta Terraform em [`infra/README.md`](infra/README.md).
+Mais detalhes técnicos de cada pasta Terraform em [`docs/infra.md`](docs/infra.md).
 
 ## Tecnologias
 
@@ -71,7 +71,7 @@ Mais detalhes técnicos de cada pasta Terraform em [`infra/README.md`](infra/REA
 
 ## Como aplicar
 
-Ver o passo a passo completo (local e AWS) em [`infra/README.md`](infra/README.md).
+Ver o passo a passo completo (local e AWS) em [`docs/infra.md`](docs/infra.md).
 Resumo do fluxo local:
 
 ```bash

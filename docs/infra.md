@@ -11,9 +11,9 @@ Três pastas, cada uma um projeto Terraform independente:
 - **`ci/`** — mesma estrutura do `local/`, mas roda dentro do runner do
   GitHub Actions a cada push: sobe um cluster efêmero, aplica tudo com a
   imagem recém publicada, e testa. É o que o pipeline de CI/CD usa.
-- **`aws/`** — cluster EKS e RDS PostgreSQL reais na AWS. Gera custo. Não
-  faz parte do escopo obrigatório desta entrega — o job `deploy-aws` fica
-  desligado por padrão (variável `AWS_DEPLOY_ENABLED`).
+- **`aws/`** — cluster EKS e RDS PostgreSQL reais na AWS. O job
+  `deploy-aws` está habilitado (`AWS_DEPLOY_ENABLED=true`) e roda a cada
+  push na `main`.
 
 ## O que cada pasta cria
 
@@ -92,22 +92,28 @@ kubectl --kubeconfig $(terraform output -raw kubeconfig_path) rollout restart de
 
 ### AWS
 
-Não faz parte do escopo desta entrega — o código existe e está revisado
-(via `terraform plan`), mas fica desligado por padrão. Antes de aplicar de
-verdade:
+A cada push na `main`, o job `deploy-aws` assume a IAM Role compartilhada
+via OIDC (sem access key estática no GitHub) e aplica o cluster e os
+manifestos da aplicação:
 
-1. Troque os valores placeholder de `k8s/overlays/aws/secret.yaml` por
-   segredos reais (esse arquivo é aplicado via `kubectl apply -k`, fora do
-   Terraform).
-2. Depois do primeiro `terraform apply`, copie o valor do output
-   `rds_endpoint` para o Secret `DB_HOST` do repositório no GitHub — o job
-   `deploy-aws` injeta esse valor em `k8s/overlays/aws/configmap.yaml` do
-   mesmo jeito que já faz hoje com `IRSA_ROLE_ARN`.
+1. `terraform apply` provisiona o cluster EKS (nodes `t3.micro`,
+   elegíveis ao Free Tier) e as roles de IAM/OIDC.
+2. O job injeta os valores reais em `k8s/overlays/aws` a partir dos
+   secrets do repositório no GitHub (`DB_HOST`, `IRSA_ROLE_ARN`,
+   `JWT_SECRET`, `DB_PASSWORD`, `NEW_RELIC_LICENSE_KEY`), substituindo os
+   placeholders do `secret.yaml`/`configmap.yaml` — nenhum segredo fica em
+   texto plano versionado no repositório.
+3. `kubectl apply -k k8s/overlays/aws` aplica os manifestos no cluster
+   real.
+
+Secrets necessários no repositório: `AWS_ROLE_ARN`, `DB_HOST`,
+`IRSA_ROLE_ARN`, `JWT_SECRET`, `DB_PASSWORD`, `NEW_RELIC_LICENSE_KEY`.
 
 ## Considerações de produção
 
 - **Credenciais da aplicação**: IRSA já implementado — o pod no EKS não
   usa nenhuma chave AWS estática.
-- **VPC dedicada**: não implementada (fora do escopo) — usa a VPC default
-  da conta.
-- **State remoto**: não implementado — o state fica local.
+- **Rede**: usa a VPC default da conta. Uma produção real usaria uma VPC
+  dedicada, com sub-redes públicas/privadas segregadas.
+- **State**: gerenciado localmente. Uma equipe com múltiplos
+  colaboradores usaria state remoto (ex: S3 + lock no DynamoDB).
