@@ -8,4 +8,12 @@ data "aws_subnets" "default" {
     name   = "vpc-id"
     values = [data.aws_vpc.default.id]
   }
+
+  # A VPC padrão dessa conta tem sub-rede em us-east-1e, mas o EKS não aceita
+  # control plane nessa AZ nessa conta (UnsupportedAvailabilityZoneException).
+  # Filtra só as AZs que a própria AWS listou como suportadas no erro.
+  filter {
+    name   = "availability-zone"
+    values = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d", "us-east-1f"]
+  }
 }

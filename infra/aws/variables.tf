@@ -13,13 +13,17 @@ variable "cluster_name" {
 variable "cluster_version" {
   description = "Versão do Kubernetes no EKS"
   type        = string
-  default     = "1.30"
+  # 1.30 não tem mais AMI gerenciada suportada pro node group (a AWS vai
+  # descontinuando versões antigas) — 1.36 é a Standard Support atual.
+  default     = "1.36"
 }
 
 variable "node_instance_type" {
   description = "Tipo de instância EC2 usada pelos nodes do cluster"
   type        = string
-  default     = "t3.medium"
+  # t3.medium não é elegível pro Free Tier nesta conta — t3.micro é (ver
+  # aws ec2 describe-instance-types --filters Name=free-tier-eligible,Values=true).
+  default     = "t3.micro"
 }
 
 variable "node_desired_size" {
