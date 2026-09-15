@@ -29,13 +29,17 @@ variable "node_instance_type" {
 variable "node_desired_size" {
   description = "Quantidade inicial de nodes"
   type        = number
-  default     = 2
+  # t3.micro tem um limite baixo de pods por node (limitação de ENI/rede da
+  # AWS, não de CPU/memória) — 2 nodes mal cabem os 2 pods da aplicação em
+  # regime normal, e travam ("Too many pods") assim que um rolling update
+  # precisa de capacidade extra temporária. 3 dá folga sem sair do Free Tier.
+  default     = 3
 }
 
 variable "node_min_size" {
   description = "Mínimo de nodes (o HPA escala pods; isso aqui escala máquinas, caso os pods não caibam mais nos nodes existentes)"
   type        = number
-  default     = 2
+  default     = 3
 }
 
 variable "node_max_size" {
