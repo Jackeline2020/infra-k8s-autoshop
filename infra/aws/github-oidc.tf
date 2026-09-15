@@ -33,9 +33,15 @@ module "github_actions_role" {
   # push/merge na branch main de qualquer um dos dois repositórios pode
   # assumir essa role: infra-k8s-autoshop (provisiona o cluster) e
   # app-autoshop (faz deploy da aplicação nele).
+  #
+  # Curinga (*) entre owner/repo porque o GitHub passou a incluir o ID
+  # numérico do owner e do repositório no "sub" do token OIDC
+  # (ex: "repo:Jackeline2020@65305616/app-autoshop@1367964021:ref:...",
+  # em vez do formato clássico "repo:Jackeline2020/app-autoshop:ref:..."),
+  # e o StringLike precisa casar com os dois formatos.
   subjects = [
-    "repo:${var.github_repository}:ref:refs/heads/main",
-    "repo:${var.app_repository}:ref:refs/heads/main",
+    "repo:${replace(var.github_repository, "/", "*/")}*:ref:refs/heads/main",
+    "repo:${replace(var.app_repository, "/", "*/")}*:ref:refs/heads/main",
   ]
 
   policies = {
