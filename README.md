@@ -1,110 +1,152 @@
 # infra-k8s-autoshop
 
-Provisionamento do cluster Kubernetes usado pela aplicação
-[`app-autoshop`](https://github.com/Jackeline2020/app-autoshop) — Terraform
-puro, sem nenhum manifesto da aplicação.
+Infraestrutura compartilhada pelos microsserviços do AutoShop, em
+Terraform: o cluster Kubernetes (EKS), as filas da Saga (SQS) e as
+permissões de cada serviço na AWS. Não contém manifestos de aplicação:
+cada serviço versiona e aplica os próprios manifestos no seu repositório.
 
-Este é o repositório 2 dos 4 exigidos pela Fase 3 do Tech Challenge. Os
-outros três: [`app-autoshop`](https://github.com/Jackeline2020/app-autoshop)
-(aplicação), [`infra-db-autoshop`](https://github.com/Jackeline2020/infra-db-autoshop)
-(banco gerenciado) e [`lambda-auth-autoshop`](https://github.com/Jackeline2020/lambda-auth-autoshop)
-(autenticação por CPF).
-
-## O que este repositório NÃO faz (e por quê)
-
-Depois de esclarecimento direto do professor da disciplina, este
-repositório foi reorganizado pra conter **só** o que é infraestrutura do
-cluster: cluster em si, node groups, rede, add-ons (metrics-server),
-autoscaling de infraestrutura. Os manifestos da aplicação (Deployment,
-Service, HPA, ConfigMap, Secret, ServiceAccount) moram e são versionados no
-[`app-autoshop`](https://github.com/Jackeline2020/app-autoshop) — a ideia é
-separar o ciclo de vida da infraestrutura do ciclo de vida da aplicação:
-provisionar um cluster é uma operação rara e cara; fazer deploy de uma
-nova versão da aplicação acontece a cada push.
+| Repositório | Papel |
+|---|---|
+| [`app-autoshop`](https://github.com/Jackeline2020/app-autoshop) | OS Service e orquestrador da Saga |
+| [`execution-autoshop`](https://github.com/Jackeline2020/execution-autoshop) | Execution Service |
+| [`billing-autoshop`](https://github.com/Jackeline2020/billing-autoshop) | Billing Service |
+| [`payment-mock-autoshop`](https://github.com/Jackeline2020/payment-mock-autoshop) | Mock do provedor de pagamento |
+| [`lambda-auth-autoshop`](https://github.com/Jackeline2020/lambda-auth-autoshop) | Autenticação por CPF |
+| [`infra-db-autoshop`](https://github.com/Jackeline2020/infra-db-autoshop) | Bancos de dados de cada serviço |
+| **`infra-k8s-autoshop`** (este) | Cluster, filas e permissões |
 
 ## Arquitetura
 
 ```mermaid
 flowchart TB
-    subgraph InfraRepo["infra-k8s-autoshop (Terraform)"]
-        Local["infra/local<br/>cluster kind, sem custo"]
-        CI["infra/ci<br/>cluster kind efêmero, dentro do runner"]
-        AWS["infra/aws<br/>cluster EKS real"]
+    subgraph AWS["infra/aws (Terraform)"]
+        EKS["Cluster EKS autoshop-eks<br/>3 nodes t3.small"]
+        SQS["SQS<br/>execution-commands, billing-commands, os-events<br/>(cada uma com DLQ)"]
+        IRSA["Roles IAM por serviço (IRSA)<br/>autoshop-api, autoshop-execution, autoshop-billing"]
+        OIDC["Role do GitHub Actions (OIDC)<br/>deploy a partir da main"]
     end
 
-    Cluster["Cluster Kubernetes<br/>(kind local/CI, ou EKS na AWS)"]
-    AppRepo["app-autoshop<br/>fornece os manifestos da aplicação<br/>(via API do GitHub, ou pasta irmã local)"]
+    subgraph Servicos["Repositórios dos serviços"]
+        APP["app-autoshop"]
+        EXE["execution-autoshop"]
+        BIL["billing-autoshop"]
+        MOCK["payment-mock-autoshop"]
+    end
 
-    Local -->|"terraform apply"| Cluster
-    CI -->|"terraform apply (job efêmero)"| Cluster
-    AWS -->|"terraform apply<br/>(gate: AWS_DEPLOY_ENABLED)"| Cluster
-    AppRepo -.->|"deploy independente<br/>(job deploy-aws do app-autoshop)"| Cluster
+    Servicos -->|"pipeline: kubectl apply -k k8s/overlays/aws<br/>(assume a role por OIDC)"| EKS
+    IRSA -.->|"permissões dos pods"| SQS
 ```
 
-- **`local/` e `ci/`**: como o cluster kind é efêmero e só existe dentro
-  do próprio job (local: na sua máquina; CI: no runner), este Terraform
-  ainda aplica os manifestos da aplicação — mas o conteúdo desses
-  manifestos vem do `app-autoshop` (variáveis `TF_VAR_*`, populadas
-  localmente lendo a pasta irmã, e na CI baixando via API do GitHub). Os
-  arquivos continuam pertencendo ao `app-autoshop`; este repositório só os
-  consome de forma read-only pra viabilizar o teste efêmero.
-- **`aws/`**: cria só o cluster EKS (node groups, rede, IRSA, acesso via
-  OIDC). Quem faz o deploy da aplicação nele é o próprio `app-autoshop`,
-  de forma totalmente independente (via `kubectl apply` autenticado com a
-  mesma role compartilhada via OIDC).
+- **Cluster:** EKS na VPC padrão da conta, com 3 nodes `t3.small`
+  (11 pods por node, suficientes para os 4 serviços, os jobs de migration
+  e o agente do New Relic).
+- **Filas da Saga** (`infra/aws/messaging.tf`): uma fila de comandos por
+  serviço e a fila de eventos do orquestrador. Cada uma tem uma DLQ: depois
+  de 5 tentativas sem sucesso, a mensagem é separada para análise.
+- **Permissões por serviço** (`infra/aws/irsa.tf`): cada serviço roda com
+  uma role IAM própria, assumida pela service account do pod, sem chave
+  fixa. Cada role só acessa as filas do próprio serviço (e, no Execution,
+  as tabelas DynamoDB `autoshop-*`).
 
-Mais detalhes técnicos de cada pasta Terraform em [`docs/infra.md`](docs/infra.md).
+| Serviço | Consome | Publica | Outros |
+|---|---|---|---|
+| OS (`autoshop-api`) | `os-events` | `execution-commands`, `billing-commands` | — |
+| Execution | `execution-commands` | `os-events` | DynamoDB `autoshop-*` |
+| Billing | `billing-commands` | `os-events` | — |
+
+- **Deploy pelo GitHub Actions** (`infra/aws/github-oidc.tf`): os
+  repositórios dos serviços assumem a role `autoshop-github-actions` por
+  OIDC, só a partir da branch `main`, e aplicam os próprios manifestos.
+
+Detalhes de cada pasta e o passo a passo em [`docs/infra.md`](docs/infra.md).
+
+## Como aplicar (AWS)
+
+Pré-requisitos: Terraform >= 1.5, AWS CLI com credenciais
+(`aws sts get-caller-identity` respondendo) e `kubectl`.
+
+```bash
+cd infra/aws
+terraform init
+terraform plan -out=plano
+terraform apply plano          # 15 a 20 minutos (a maior parte é o EKS)
+
+aws eks update-kubeconfig --region us-east-1 --name autoshop-eks
+kubectl get nodes
+```
+
+As saídas são usadas no `infra-db-autoshop` e nos secrets dos
+repositórios dos serviços:
+
+| Saída | Uso |
+|---|---|
+| `eks_node_security_group_id` | Variável das stacks `os/` e `billing/` do `infra-db-autoshop` (libera os bancos para os nodes) |
+| `github_actions_role_arn` | Secret `AWS_ROLE_ARN` dos repositórios que fazem deploy |
+| `irsa_role_arns` | Secret `IRSA_ROLE_ARN` de cada serviço (`app`, `execution`, `billing`) |
+| `queue_urls` | Conferência das filas (os serviços descobrem as URLs pelo nome) |
+
+Ordem completa para subir o ambiente:
+
+1. `infra-k8s-autoshop/infra/aws`: cluster, filas e roles
+2. `infra-db-autoshop`: stacks `os`, `billing` e `execution`
+3. Secrets nos repositórios dos serviços e variável `AWS_DEPLOY_ENABLED=true`
+4. Merge `develop → main` em cada serviço: o pipeline faz o deploy
+
+## Como destruir
+
+Os Load Balancers dos serviços são criados pelo Kubernetes (Services do
+tipo `LoadBalancer`) e não estão no estado do Terraform. Por isso o
+namespace precisa ser removido antes:
+
+```bash
+kubectl delete namespace autoshop            # remove os Load Balancers
+helm uninstall newrelic-bundle -n newrelic   # se o New Relic estiver instalado
+
+# infra-db-autoshop
+terraform -chdir=os destroy
+terraform -chdir=billing destroy
+terraform -chdir=execution destroy
+
+# este repositório
+cd infra/aws && terraform destroy
+```
+
+Depois, voltar `AWS_DEPLOY_ENABLED=false` nos repositórios dos serviços.
+
+## Observabilidade
+
+A pasta [`observability/`](observability) versiona no Terraform o dashboard
+e os alertas do New Relic: OS e Saga (abertas, finalizadas, canceladas,
+tempo por status, passos da Saga, rastreamento por `correlation_id`),
+saúde dos 3 serviços (tempo de resposta, volume, taxa de erro) e alertas
+de falha no processamento, Saga cancelada por prazo e taxa de erro, com
+notificação por e-mail.
+
+O monitoramento do cluster usa o `nri-bundle` do New Relic, instalado por
+Helm depois que o cluster existe.
+
+## Ambientes kind (local e homologação)
+
+- **`infra/local`**: cluster kind na máquina, sem custo.
+- **`infra/ci`**: cluster kind efêmero dentro do runner do GitHub Actions,
+  disparado pelo `app-autoshop` a cada publicação na `develop`
+  (homologação com smoke test).
+
+Os dois foram criados na Fase 3, com o app como único serviço. Na Fase 4,
+o app passou a depender das filas da Saga; o ambiente de produção é o EKS.
+
+## Pipeline (`.github/workflows/ci-cd.yml`)
+
+1. **terraform-validate**: valida o Terraform de `infra/ci`, `infra/aws` e
+   `observability` em todo pull request.
+2. **deploy-local**: homologação no kind, disparada pelo `app-autoshop`.
+3. **deploy-aws**: aplica `infra/aws` pelo pipeline, habilitado pela
+   variável `AWS_DEPLOY_ENABLED`. Fica desligado: sem state remoto, a infra
+   da AWS é aplicada a partir da máquina de quem administra o ambiente.
 
 ## Tecnologias
 
-- Terraform (providers `kind`, `kubectl`, `helm`, `aws`)
-- Kubernetes (kind para local/CI, EKS na AWS)
+- Terraform (providers `aws`, `kind`, `kubectl`, `helm`)
+- AWS: EKS, SQS, IAM (OIDC e IRSA)
+- Kubernetes (EKS; kind para local e homologação)
 - GitHub Actions
-- AWS (EKS, IAM/OIDC) para o ambiente de produção
-
-## Pré-requisitos
-
-- Terraform >= 1.5
-- Docker + CLI `kind` (`winget install Kubernetes.kind`) para uso local
-- Repositório `app-autoshop` clonado como pasta irmã (`../app-autoshop`),
-  necessário pra ler os manifestos da aplicação localmente
-
-## Como aplicar
-
-Ver o passo a passo completo (local e AWS) em [`docs/infra.md`](docs/infra.md).
-Resumo do fluxo local:
-
-```bash
-cd infra/local
-export TF_VAR_migration_sql="$(cat ../../../app-autoshop/migrations/000001_init_schema.up.sql)"
-export TF_VAR_deployment_yaml="$(cat ../../../app-autoshop/k8s/base/deployment.yaml)"
-export TF_VAR_service_yaml="$(cat ../../../app-autoshop/k8s/base/service.yaml)"
-export TF_VAR_hpa_yaml="$(cat ../../../app-autoshop/k8s/base/hpa.yaml)"
-export TF_VAR_configmap_yaml="$(cat ../../../app-autoshop/k8s/overlays/local/configmap.yaml)"
-export TF_VAR_secret_yaml="$(cat ../../../app-autoshop/k8s/overlays/local/secret.yaml)"
-export TF_VAR_serviceaccount_yaml="$(cat ../../../app-autoshop/k8s/overlays/local/serviceaccount.yaml)"
-
-terraform init
-terraform apply -target="kind_cluster.autoshop"
-docker build -t autoshop-api:latest ../../../app-autoshop
-kind load docker-image autoshop-api:latest --name autoshop-local
-terraform apply
-```
-
-## Pipeline CI/CD (`.github/workflows/ci-cd.yml`)
-
-1. **terraform-validate** — valida o Terraform de `infra/ci` em toda PR.
-2. **deploy-local** — (disparado pelo `app-autoshop` via `repository_dispatch`
-   quando algo é publicado em `develop`, ou manualmente via
-   `workflow_dispatch`) sobe um cluster kind efêmero, busca os manifestos
-   da aplicação no `app-autoshop`, aplica tudo, roda a migration, espera o
-   rollout, faz smoke test e destrói o cluster — é o ambiente de
-   homologação, sem custo de nuvem.
-3. **deploy-aws** — (disparado quando `app-autoshop` publica em `main`, se
-   a variável `AWS_DEPLOY_ENABLED=true`) roda `terraform apply` em
-   `infra/aws`: provisiona/atualiza só o cluster EKS. Não mexe em nada da
-   aplicação — isso é feito pelo `app-autoshop` de forma independente.
-
-Secrets necessários: `APP_REPO_READ_TOKEN` (lê os manifestos do
-`app-autoshop`), `AWS_ROLE_ARN`, `RDS_SECRET_ARN`.
-Variável: `AWS_DEPLOY_ENABLED`.

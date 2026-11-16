@@ -1,6 +1,9 @@
-﻿.terraform/
+.terraform/
 terraform.tfstate
 terraform.tfstate.backup
 *.tfvars
 kubeconfig*
 autoshop-local-config
+# Planos salvos do terraform (podem conter valores sensíveis)
+plano
+*.tfplan

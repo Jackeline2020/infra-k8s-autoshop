@@ -1,119 +1,85 @@
 # Infraestrutura como Código (Terraform)
 
-Os manifestos Kubernetes ficam em `k8s/base` (comum a todos os ambientes)
-e `k8s/overlays/local` / `k8s/overlays/aws` (o que muda entre eles). O
-Terraform aplica esses manifestos como resources reais (`kubectl_manifest`),
-não via `kubectl apply` direto.
+Três projetos Terraform independentes:
 
-Três pastas, cada uma um projeto Terraform independente:
+| Pasta | O que cria | Quando usar |
+|---|---|---|
+| `infra/aws/` | Cluster EKS, filas SQS da Saga, roles IAM dos serviços e do GitHub Actions | Produção (AWS) |
+| `infra/local/` | Cluster kind com Postgres e o app | Testes na máquina, sem custo |
+| `infra/ci/` | Igual ao `local/`, dentro do runner do GitHub Actions | Homologação da `develop` |
 
-- **`local/`** — cluster Kubernetes local (kind), sem custo, para testes.
-- **`ci/`** — mesma estrutura do `local/`, mas roda dentro do runner do
-  GitHub Actions a cada push: sobe um cluster efêmero, aplica tudo com a
-  imagem recém publicada, e testa. É o que o pipeline de CI/CD usa.
-- **`aws/`** — cluster EKS e RDS PostgreSQL reais na AWS. O job
-  `deploy-aws` está habilitado (`AWS_DEPLOY_ENABLED=true`) e roda a cada
-  push na `main`.
+Os bancos de dados dos serviços ficam no repositório
+[`infra-db-autoshop`](https://github.com/Jackeline2020/infra-db-autoshop),
+uma stack por banco.
 
-## O que cada pasta cria
+## `infra/aws/`
 
-### `local/`
+| Arquivo | Recursos |
+|---|---|
+| `network.tf` | Consulta da VPC e das subnets padrão da conta (filtrando as zonas aceitas pelo EKS) |
+| `eks.tf` | Cluster `autoshop-eks` (Kubernetes 1.36), node group gerenciado de 3 `t3.small`, IRSA habilitado, acesso de administrador para a role do GitHub Actions |
+| `messaging.tf` | Filas `execution-commands`, `billing-commands` e `os-events`, cada uma com DLQ (`maxReceiveCount` 5, retenção de 14 dias) |
+| `irsa.tf` | Uma role por serviço (`autoshop-api-irsa`, `autoshop-execution-irsa`, `autoshop-billing-irsa`), assumida pela service account do pod, com acesso só às filas do serviço; a do Execution também acessa as tabelas DynamoDB `autoshop-*` |
+| `github-oidc.tf` | Provedor OIDC do GitHub e a role `autoshop-github-actions`, que só pode ser assumida a partir da `main` dos repositórios listados em `deploy_repositories` |
+| `variables.tf` | Região, nome e versão do cluster, tipo e quantidade de nodes, repositórios autorizados a fazer deploy |
+| `outputs.tf` | Endpoint do cluster, security group dos nodes, ARNs das roles e URLs das filas |
 
-Cluster kind + namespace + Postgres (dentro do cluster) + Job que aplica
-a migration do schema (`migrations/000001_init_schema.up.sql`) +
-metrics-server via Helm (necessário pro HPA) + os manifestos da aplicação
-(config, secret, deployment, service, hpa).
+### Por que IRSA
 
-O cluster kind não enxerga imagens Docker buildadas fora dele — por isso a
-imagem da API precisa ser carregada manualmente antes do deploy (ver
-"Como aplicar").
+Cada pod assume uma role IAM pela própria service account do Kubernetes,
+com credenciais temporárias. Nenhuma chave da AWS fica em imagem,
+ConfigMap ou Secret, e cada serviço só enxerga os próprios recursos: o
+Billing não consegue ler a fila do Execution, por exemplo.
 
-### `ci/`
+### Aplicar
 
-Estrutura parecida com a do `local/`, com diferenças: usa a imagem
-publicada no GHCR nesta execução (em vez de uma tag fixa), cria um
-`imagePullSecret` a partir do `GITHUB_TOKEN` do próprio workflow — o
-cluster efêmero não tem a imagem em cache local — e não instala o
-metrics-server (evita competir por CPU/memória no runner).
+```bash
+cd infra/aws
+terraform init
+terraform plan -out=plano
+terraform apply plano
+aws eks update-kubeconfig --region us-east-1 --name autoshop-eks
+```
 
-### `aws/`
+Na sequência: stacks do `infra-db-autoshop` (com o
+`eks_node_security_group_id`), secrets nos repositórios dos serviços e
+merge `develop → main` em cada um.
 
-Cria um cluster EKS gerenciado, uma instância RDS PostgreSQL real (numa
-subnet privada, só acessível a partir dos nodes do EKS) com a credencial
-guardada no Secrets Manager, e a configuração de acesso necessária
-(autenticação do GitHub Actions via OIDC, sem chave fixa, e uma IAM Role
-dedicada ao pod da API via IRSA — que agora só tem permissão de
-`secretsmanager:GetSecretValue` na credencial do banco, sem acesso direto
-a nenhum serviço de dados).
+### Destruir
 
-## Como aplicar
+1. `kubectl delete namespace autoshop` (remove os Load Balancers, que não
+   estão no estado do Terraform)
+2. `terraform destroy` nas stacks do `infra-db-autoshop`
+3. `terraform destroy` em `infra/aws`
 
-### Local
+## `infra/local/` e `infra/ci/`
 
-Pré-requisitos: Terraform >= 1.5, Docker, CLI `kind` (`winget install Kubernetes.kind`
-no Windows, ou ver [kind.sigs.k8s.io](https://kind.sigs.k8s.io/docs/user/quick-start/#installation)).
+Cluster kind + namespace + Postgres dentro do cluster + Job de migration +
+metrics-server (só no local) + os manifestos do app, lidos do
+`app-autoshop` (pasta irmã no local; API do GitHub no CI).
 
 ```bash
 cd infra/local
 terraform init
-terraform apply -target="kind_cluster.autoshop"   # cria só o cluster primeiro
-
-docker build -t autoshop-api:latest ../..
+terraform apply -target="kind_cluster.autoshop"
+docker build -t autoshop-api:latest ../../../app-autoshop
 kind load docker-image autoshop-api:latest --name autoshop-local
-
-terraform apply                                  # aplica o restante
-
-# esse apply não fica esperando o Deployment ficar 100% disponível
-kubeconfig=$(terraform output -raw kubeconfig_path)
-kubectl --kubeconfig "$kubeconfig" rollout status deployment/autoshop-api -n autoshop --timeout=300s
-
+terraform apply
 curl http://localhost:30080/health
 ```
 
-Pra encerrar: `terraform destroy`.
+Problemas comuns:
 
-Se um `terraform apply` for repetido depois que o job `db-migrate` já
-rodou, o Kubernetes pode recusar o patch com "field is immutable" (o
-`spec.template` de um Job não pode ser alterado). Nesse caso, apaga o job e
-aplica de novo:
-
-```bash
-kubectl --kubeconfig $(terraform output -raw kubeconfig_path) delete job db-migrate -n autoshop
-terraform apply
-```
-
-Se os pods da API ficarem em `ImagePullBackOff`/`ErrImagePull`, refaz o build/load e reinicia o rollout
-
-```bash
-docker build -t autoshop-api:latest ../..
-kind load docker-image autoshop-api:latest --name autoshop-local
-kubectl --kubeconfig $(terraform output -raw kubeconfig_path) rollout restart deployment/autoshop-api -n autoshop
-```
-
-### AWS
-
-A cada push na `main`, o job `deploy-aws` assume a IAM Role compartilhada
-via OIDC (sem access key estática no GitHub) e aplica o cluster e os
-manifestos da aplicação:
-
-1. `terraform apply` provisiona o cluster EKS (nodes `t3.micro`,
-   elegíveis ao Free Tier) e as roles de IAM/OIDC.
-2. O job injeta os valores reais em `k8s/overlays/aws` a partir dos
-   secrets do repositório no GitHub (`DB_HOST`, `IRSA_ROLE_ARN`,
-   `JWT_SECRET`, `DB_PASSWORD`, `NEW_RELIC_LICENSE_KEY`), substituindo os
-   placeholders do `secret.yaml`/`configmap.yaml` — nenhum segredo fica em
-   texto plano versionado no repositório.
-3. `kubectl apply -k k8s/overlays/aws` aplica os manifestos no cluster
-   real.
-
-Secrets necessários no repositório: `AWS_ROLE_ARN`, `DB_HOST`,
-`IRSA_ROLE_ARN`, `JWT_SECRET`, `DB_PASSWORD`, `NEW_RELIC_LICENSE_KEY`.
+- **"field is immutable" no job de migration**: apagar o job
+  (`kubectl delete job db-migrate -n autoshop`) e aplicar de novo.
+- **`ImagePullBackOff`**: refazer o `docker build` e o `kind load`, depois
+  `kubectl rollout restart deployment/autoshop-api -n autoshop`.
 
 ## Considerações de produção
 
-- **Credenciais da aplicação**: IRSA já implementado — o pod no EKS não
-  usa nenhuma chave AWS estática.
-- **Rede**: usa a VPC default da conta. Uma produção real usaria uma VPC
-  dedicada, com sub-redes públicas/privadas segregadas.
-- **State**: gerenciado localmente. Uma equipe com múltiplos
-  colaboradores usaria state remoto (ex: S3 + lock no DynamoDB).
+- **State:** local. Uma equipe usaria state remoto (S3 com lock), o que
+  também permitiria aplicar a infra pelo pipeline.
+- **Rede:** VPC padrão da conta. Uma produção real usaria uma VPC dedicada,
+  com subnets privadas para os nodes e os bancos.
+- **Exposição:** os serviços usam Load Balancers próprios. Uma produção
+  real usaria um Ingress ou um API Gateway na frente, com autorização.
