@@ -5,7 +5,7 @@
 data "aws_caller_identity" "current" {}
 
 locals {
-  namespace = "autoshop"
+  namespace                 = "autoshop"
   dynamodb_table_arn_prefix = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/autoshop-"
 
   # serviço => permissões
