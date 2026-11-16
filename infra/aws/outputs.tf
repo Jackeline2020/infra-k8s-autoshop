@@ -12,16 +12,21 @@ output "configure_kubectl" {
 }
 
 output "github_actions_role_arn" {
-  description = "Colar este valor no Secret AWS_ROLE_ARN do repositório no GitHub, o workflow de CI/CD assume essa role via OIDC"
+  description = "Secret AWS_ROLE_ARN dos repositórios que fazem deploy: o pipeline assume essa role via OIDC"
   value       = module.github_actions_role.arn
 }
 
-output "irsa_role_arn" {
-  description = "Colar este valor no Secret IRSA_ROLE_ARN do repositório no GitHub, usado pelo pipeline para anotar a service account do pod da API"
-  value       = module.irsa_autoshop_api.iam_role_arn
+output "irsa_role_arns" {
+  description = "Secret IRSA_ROLE_ARN de cada repositório de serviço (anota a service account do pod)"
+  value       = { for svc, m in module.irsa : svc => m.iam_role_arn }
+}
+
+output "queue_urls" {
+  description = "Filas da Saga"
+  value       = { for q, r in aws_sqs_queue.this : q => r.url }
 }
 
 output "eks_node_security_group_id" {
-  description = "Colar na variável eks_node_security_group_id do repositório infra-db — libera o RDS pra aceitar conexões vindas dos nodes do EKS"
+  description = "Variável eks_node_security_group_id das stacks os/ e billing/ do infra-db-autoshop: libera os bancos RDS para os nodes do EKS"
   value       = module.eks.node_security_group_id
 }

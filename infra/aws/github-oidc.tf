@@ -1,22 +1,6 @@
-# autenticacao do GitHub Actions na AWS via OIDC
-variable "github_repository" {
-  description = "Repositório GitHub autorizado a assumir a role de deploy (provisionamento do cluster)"
-  type        = string
-  default     = "Jackeline2020/infra-k8s-autoshop"
-}
-
-# Desde a reorganização pedida pelo professor, o repositório app-autoshop
-# também precisa assumir essa role — é ele quem agora aplica os manifestos
-# da aplicação (Deployment, Service, HPA, ConfigMap, Secret) diretamente no
-# cluster EKS real, de forma independente deste repositório (que só
-# provisiona o cluster em si). Os dois repositórios compartilham a mesma
-# role porque os dois legitimamente precisam de acesso administrativo ao
-# cluster — cada um autenticado via OIDC, sem nenhuma chave fixa.
-variable "app_repository" {
-  description = "Repositório GitHub (app-autoshop) autorizado a assumir a role de deploy da aplicação"
-  type        = string
-  default     = "Jackeline2020/app-autoshop"
-}
+# Autenticação do GitHub Actions na AWS via OIDC: cada repositório de
+# serviço faz o deploy dos próprios manifestos no cluster a partir da
+# branch main, sem nenhuma chave fixa.
 
 # modulos oficiais da comunidade Terraform
 module "github_oidc_provider" {
@@ -30,18 +14,12 @@ module "github_actions_role" {
 
   name = "autoshop-github-actions"
 
-  # push/merge na branch main de qualquer um dos dois repositórios pode
-  # assumir essa role: infra-k8s-autoshop (provisiona o cluster) e
-  # app-autoshop (faz deploy da aplicação nele).
-  #
-  # Curinga (*) entre owner/repo porque o GitHub passou a incluir o ID
+  # Curinga (*) entre owner/repo porque o GitHub pode incluir o ID
   # numérico do owner e do repositório no "sub" do token OIDC
-  # (ex: "repo:Jackeline2020@65305616/app-autoshop@1367964021:ref:...",
-  # em vez do formato clássico "repo:Jackeline2020/app-autoshop:ref:..."),
-  # e o StringLike precisa casar com os dois formatos.
+  # (ex.: "repo:Jackeline2020@65305616/app-autoshop@1367964021:ref:...").
   subjects = [
-    "repo:${replace(var.github_repository, "/", "*/")}*:ref:refs/heads/main",
-    "repo:${replace(var.app_repository, "/", "*/")}*:ref:refs/heads/main",
+    for repo in var.deploy_repositories :
+    "repo:${var.github_owner}*/${repo}*:ref:refs/heads/main"
   ]
 
   policies = {
