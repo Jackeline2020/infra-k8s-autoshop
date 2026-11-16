@@ -23,6 +23,10 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
       - run: terraform -chdir=infra/ci init
       - run: terraform -chdir=infra/ci validate
+      - run: terraform -chdir=infra/aws init -backend=false
+      - run: terraform -chdir=infra/aws validate
+      - run: terraform -chdir=observability init -backend=false
+      - run: terraform -chdir=observability validate
 
   # Cluster kind efêmero dentro do próprio runner — mesma lógica que já
   # existia no monorepo, só que agora reage a um evento vindo de outro
@@ -180,7 +184,6 @@ jobs:
       id-token: write
     env:
       AWS_REGION: us-east-1
-      TF_VAR_rds_secret_arn: ${{ secrets.RDS_SECRET_ARN }}
     defaults:
       run:
         working-directory: infra/aws

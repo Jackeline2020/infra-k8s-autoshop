@@ -15,24 +15,21 @@ variable "cluster_version" {
   type        = string
   # 1.30 não tem mais AMI gerenciada suportada pro node group (a AWS vai
   # descontinuando versões antigas) — 1.36 é a Standard Support atual.
-  default     = "1.36"
+  default = "1.36"
 }
 
 variable "node_instance_type" {
   description = "Tipo de instância EC2 usada pelos nodes do cluster"
   type        = string
-  # t3.medium não é elegível pro Free Tier nesta conta — t3.micro é (ver
-  # aws ec2 describe-instance-types --filters Name=free-tier-eligible,Values=true).
-  default     = "t3.micro"
+  # t3.small comporta 11 pods por node (o t3.micro só 4, limite de rede da
+  # AWS): cabem os 3 serviços, o mock de pagamento, os jobs de migration e
+  # o agente do New Relic.
+  default = "t3.small"
 }
 
 variable "node_desired_size" {
   description = "Quantidade inicial de nodes"
   type        = number
-  # t3.micro tem um limite baixo de pods por node (limitação de ENI/rede da
-  # AWS, não de CPU/memória) — 2 nodes mal cabem os 2 pods da aplicação em
-  # regime normal, e travam ("Too many pods") assim que um rolling update
-  # precisa de capacidade extra temporária. 3 dá folga sem sair do Free Tier.
   default     = 3
 }
 
@@ -48,7 +45,20 @@ variable "node_max_size" {
   default     = 6
 }
 
-variable "rds_secret_arn" {
-  description = "ARN do secret do RDS no Secrets Manager — output rds_secret_arn do repositório infra-db. Colar aqui (via -var ou TF_VAR_rds_secret_arn) depois do primeiro apply do infra-db. Mesmo padrão manual já usado para IRSA_ROLE_ARN."
+variable "github_owner" {
+  description = "Dono dos repositórios no GitHub"
   type        = string
+  default     = "Jackeline2020"
+}
+
+variable "deploy_repositories" {
+  description = "Repositórios autorizados a fazer deploy no cluster a partir da branch main (via OIDC, sem chave fixa)"
+  type        = list(string)
+  default = [
+    "infra-k8s-autoshop",
+    "app-autoshop",
+    "execution-autoshop",
+    "billing-autoshop",
+    "payment-mock-autoshop",
+  ]
 }
