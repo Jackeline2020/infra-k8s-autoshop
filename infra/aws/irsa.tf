@@ -1,36 +1,82 @@
-# IRSA da ao POD da API uma IAM role real, assumida atraves da sua service account do Kubernetes
-module "irsa_autoshop_api" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version = "~> 5.0"
+# IRSA: cada serviço roda com uma role IAM própria, assumida pela service
+# account do pod, sem chave de acesso fixa. Cada role só enxerga as filas
+# e tabelas do próprio serviço.
 
-  role_name = "autoshop-api-irsa"
+data "aws_caller_identity" "current" {}
 
-  oidc_providers = {
-    main = {
-      provider_arn = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["autoshop:autoshop-api"]
+locals {
+  namespace = "autoshop"
+  dynamodb_table_arn_prefix = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/autoshop-"
+
+  # serviço => permissões
+  services = {
+    "autoshop-api" = {
+      consume = ["os-events"]
+      publish = ["execution-commands", "billing-commands"]
+      dynamo  = false
+    }
+    "autoshop-execution" = {
+      consume = ["execution-commands"]
+      publish = ["os-events"]
+      dynamo  = true
+    }
+    "autoshop-billing" = {
+      consume = ["billing-commands"]
+      publish = ["os-events"]
+      dynamo  = false
     }
   }
 }
 
-# credencial no secrets manager pra então abrir a conexão Postgres.
-# aws_secretsmanager_secret.db não existe mais neste repositório (o RDS
-# agora é do infra-db) — por isso o ARN vem de uma variável, colada
-# manualmente a partir do output rds_secret_arn do infra-db.
-resource "aws_iam_policy" "app_secrets_access" {
-  name = "autoshop-api-secrets-access"
+module "irsa" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.0"
+
+  for_each  = local.services
+  role_name = "${each.key}-irsa"
+
+  oidc_providers = {
+    main = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["${local.namespace}:${each.key}"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "service" {
+  for_each = local.services
+
+  name = "${each.key}-access"
+  role = module.irsa[each.key].iam_role_name
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = [var.rds_secret_arn]
-    }]
+    Statement = concat(
+      [
+        {
+          Sid      = "ConsumirComandosOuEventos"
+          Effect   = "Allow"
+          Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueUrl", "sqs:GetQueueAttributes"]
+          Resource = [for q in each.value.consume : aws_sqs_queue.this[q].arn]
+        },
+        {
+          Sid      = "Publicar"
+          Effect   = "Allow"
+          Action   = ["sqs:SendMessage", "sqs:GetQueueUrl", "sqs:GetQueueAttributes"]
+          Resource = [for q in each.value.publish : aws_sqs_queue.this[q].arn]
+        },
+      ],
+      each.value.dynamo ? [
+        {
+          Sid    = "TabelasDoExecution"
+          Effect = "Allow"
+          Action = [
+            "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem",
+            "dynamodb:Query", "dynamodb:Scan", "dynamodb:ConditionCheckItem",
+          ]
+          Resource = ["${local.dynamodb_table_arn_prefix}*"]
+        },
+      ] : []
+    )
   })
-}
-
-resource "aws_iam_role_policy_attachment" "irsa_secrets" {
-  role       = module.irsa_autoshop_api.iam_role_name
-  policy_arn = aws_iam_policy.app_secrets_access.arn
 }
