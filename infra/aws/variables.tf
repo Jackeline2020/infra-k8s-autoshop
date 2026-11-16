@@ -15,7 +15,7 @@ variable "cluster_version" {
   type        = string
   # 1.30 não tem mais AMI gerenciada suportada pro node group (a AWS vai
   # descontinuando versões antigas) — 1.36 é a Standard Support atual.
-  default     = "1.36"
+  default = "1.36"
 }
 
 variable "node_instance_type" {
