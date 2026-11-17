@@ -59,7 +59,7 @@ jobs:
         with:
           terraform_version: "~1.9"
 
-      - name: Baixar os schemas de migration do repositório app
+      - name: Baixar as migrations do repositório app (todas as *.up.sql)
         env:
           TOKEN: ${{ secrets.APP_REPO_READ_TOKEN }}
         run: |
@@ -67,21 +67,22 @@ jobs:
             echo "Secret APP_REPO_READ_TOKEN não configurado — veja infra/README.md" >&2
             exit 1
           fi
-          declare -A MIGRATIONS=(
-            [migration_sql]="migrations/000001_init_schema.up.sql"
-            [migration_sql_2]="migrations/000002_add_customer_status.up.sql"
-          )
-          for VAR in "${!MIGRATIONS[@]}"; do
-            REPO_PATH="${MIGRATIONS[$VAR]}"
+          API="https://api.github.com/repos/Jackeline2020/app-autoshop/contents"
+          FILES=$(curl -sfL -H "Authorization: Bearer $TOKEN" "$API/migrations?ref=develop" \
+            | jq -r '.[] | select(.name | endswith(".up.sql")) | .name' | sort)
+          echo '{}' > /tmp/migrations.json
+          for F in $FILES; do
             curl -sfL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github.raw" \
-              "https://api.github.com/repos/Jackeline2020/app-autoshop/contents/${REPO_PATH}" \
-              -o /tmp/"${VAR}".sql
-            {
-              echo "TF_VAR_${VAR}<<EOF_${VAR}"
-              cat /tmp/"${VAR}".sql
-              echo "EOF_${VAR}"
-            } >> "$GITHUB_ENV"
+              "$API/migrations/$F?ref=develop" -o "/tmp/$F"
+            jq --arg k "$F" --rawfile v "/tmp/$F" '. + {($k): $v}' /tmp/migrations.json > /tmp/m.json
+            mv /tmp/m.json /tmp/migrations.json
+            echo "migration: $F"
           done
+          {
+            echo "TF_VAR_migration_files<<EOF_MIGRATIONS"
+            cat /tmp/migrations.json
+            echo "EOF_MIGRATIONS"
+          } >> "$GITHUB_ENV"
 
       - name: Baixar os manifestos Kubernetes do repositório app
         env:
@@ -102,7 +103,7 @@ jobs:
           for VAR in "${!FILES[@]}"; do
             REPO_PATH="${FILES[$VAR]}"
             curl -sfL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github.raw" \
-              "https://api.github.com/repos/Jackeline2020/app-autoshop/contents/${REPO_PATH}" \
+              "https://api.github.com/repos/Jackeline2020/app-autoshop/contents/${REPO_PATH}?ref=develop" \
               -o /tmp/"${VAR}".yaml
             {
               echo "TF_VAR_${VAR}<<EOF_${VAR}"
@@ -114,7 +115,7 @@ jobs:
       - name: Terraform init
         run: terraform init
 
-      - name: Terraform apply (cluster + namespace + banco + config + app)
+      - name: Terraform apply (cluster + namespace + banco + filas + config + app)
         run: |
           for i in 1 2 3; do
             terraform apply -auto-approve -parallelism=1 && exit 0

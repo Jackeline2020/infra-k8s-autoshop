@@ -14,15 +14,9 @@ variable "ghcr_token" {
   sensitive   = true
 }
 
-variable "migration_sql" {
-  description = "Conteúdo do arquivo migrations/000001_init_schema.up.sql, que mora no repositório app-autoshop. O workflow (ci-cd.yml) baixa esse arquivo via API do GitHub e passa aqui via TF_VAR_migration_sql antes do apply — não dá pra usar file() porque o arquivo não existe neste repositório."
-  type        = string
-  sensitive   = true
-}
-
-variable "migration_sql_2" {
-  description = "Conteúdo do arquivo migrations/000002_add_customer_status.up.sql do app-autoshop (mesma lógica do migration_sql acima). Aplicado depois de migration_sql, na mesma ordem numérica."
-  type        = string
+variable "migration_files" {
+  description = "Migrations do app-autoshop (pasta migrations/, arquivos *.up.sql), no formato { nome do arquivo = conteúdo }. O workflow baixa os arquivos via API do GitHub e passa aqui via TF_VAR_migration_files; são aplicadas em ordem alfabética (000001, 000002...)."
+  type        = map(string)
   sensitive   = true
 }
 
