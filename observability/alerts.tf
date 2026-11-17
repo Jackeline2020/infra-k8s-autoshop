@@ -14,8 +14,10 @@ resource "newrelic_nrql_alert_condition" "falhas_os" {
   enabled                      = true
   violation_time_limit_seconds = 86400
   aggregation_window           = 60
-  aggregation_method           = "event_flow"
-  aggregation_delay            = 120
+  # Eventos raros: a janela fecha por tempo (event_timer), sem depender de
+  # novos eventos chegarem depois (como no event_flow)
+  aggregation_method = "event_timer"
+  aggregation_timer  = 60
 
   nrql {
     query = "SELECT count(*) FROM OrderProcessingFailure"
@@ -40,8 +42,10 @@ resource "newrelic_nrql_alert_condition" "saga_prazo" {
   enabled                      = true
   violation_time_limit_seconds = 86400
   aggregation_window           = 60
-  aggregation_method           = "event_flow"
-  aggregation_delay            = 120
+  # Eventos raros: a janela fecha por tempo (event_timer), sem depender de
+  # novos eventos chegarem depois (como no event_flow)
+  aggregation_method = "event_timer"
+  aggregation_timer  = 60
 
   nrql {
     query = "SELECT count(*) FROM OrderLifecycle WHERE eventName = 'saga_progress' AND trigger = 'saga_timeout'"
