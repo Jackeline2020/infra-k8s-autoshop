@@ -1,0 +1,78 @@
+# Filas da Saga para a homologação: o app exige as filas SQS para subir.
+# No EKS elas são filas reais da AWS; aqui, um LocalStack dentro do cluster
+# efêmero, com as mesmas filas.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: localstack-init
+  namespace: autoshop
+data:
+  init-aws.sh: |
+    #!/bin/bash
+    set -e
+    for q in execution-commands billing-commands os-events; do
+      awslocal sqs create-queue --queue-name "$q" >/dev/null
+      echo "fila $q criada"
+    done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localstack
+  namespace: autoshop
+  labels:
+    app: localstack
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: localstack
+  template:
+    metadata:
+      labels:
+        app: localstack
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: localstack
+          image: localstack/localstack:4.3
+          env:
+            - name: SERVICES
+              value: sqs
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+          ports:
+            - containerPort: 4566
+          volumeMounts:
+            - name: init
+              mountPath: /etc/localstack/init/ready.d
+          # Só fica pronto depois que as filas existem
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "awslocal sqs get-queue-url --queue-name os-events >/dev/null 2>&1"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 768Mi
+      volumes:
+        - name: init
+          configMap:
+            name: localstack-init
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localstack
+  namespace: autoshop
+spec:
+  selector:
+    app: localstack
+  ports:
+    - port: 4566
+      targetPort: 4566

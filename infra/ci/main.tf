@@ -13,7 +13,7 @@ resource "kind_cluster" "ci" {
 
       extra_port_mappings {
         container_port = 30080
-        host_port       = 30080
+        host_port      = 30080
       }
     }
   }
@@ -74,13 +74,48 @@ resource "kubectl_manifest" "ghcr_pull_secret" {
 # do repositório app-autoshop, baixado pelo workflow via API do GitHub (ver
 # .github/workflows/ci-cd.yml) — desde a reorganização pedida pelo
 # professor, esses manifestos são versionados lá, não aqui.
+#
+# Na homologação, o app usa as filas da Saga no LocalStack (ver
+# localstack.yaml): as variáveis abaixo são acrescentadas ao ConfigMap e ao
+# Secret locais do app só aqui, sem alterar os arquivos do app-autoshop.
+locals {
+  app_config = yamldecode(var.configmap_yaml)
+  app_secret = yamldecode(var.secret_yaml)
+
+  homolog_config = {
+    AWS_REGION            = "us-east-1"
+    AWS_ENDPOINT_URL      = "http://localstack:4566"
+    EXECUTION_SERVICE_URL = "http://autoshop-execution:8080"
+    SAGA_STEP_TIMEOUT     = "5m"
+  }
+  homolog_secret = {
+    AWS_ACCESS_KEY_ID     = "test"
+    AWS_SECRET_ACCESS_KEY = "test"
+  }
+}
+
 resource "kubectl_manifest" "configmap" {
-  yaml_body  = var.configmap_yaml
+  yaml_body = yamlencode(merge(local.app_config, {
+    data = merge(local.app_config.data, local.homolog_config)
+  }))
   depends_on = [kubectl_manifest.namespace]
 }
 
 resource "kubectl_manifest" "secret" {
-  yaml_body  = var.secret_yaml
+  yaml_body = yamlencode(merge(local.app_secret, {
+    stringData = merge(local.app_secret.stringData, local.homolog_secret)
+  }))
+  depends_on = [kubectl_manifest.namespace]
+}
+
+# --- Filas da Saga: LocalStack dentro do cluster ---
+data "kubectl_file_documents" "localstack" {
+  content = file("${path.module}/localstack.yaml")
+}
+
+resource "kubectl_manifest" "localstack" {
+  for_each   = data.kubectl_file_documents.localstack.manifests
+  yaml_body  = each.value
   depends_on = [kubectl_manifest.namespace]
 }
 
@@ -110,10 +145,8 @@ resource "kubectl_manifest" "db_migration_sql" {
       name      = "db-migration-sql"
       namespace = "autoshop"
     }
-    data = {
-      "000001_init_schema.up.sql"          = var.migration_sql
-      "000002_add_customer_status.up.sql"  = var.migration_sql_2
-    }
+    # Todas as migrations do app (*.up.sql), aplicadas em ordem pelo Job abaixo
+    data = var.migration_files
   })
   depends_on = [kubectl_manifest.namespace]
 }
@@ -177,6 +210,7 @@ resource "kubectl_manifest" "deployment" {
     kubectl_manifest.secret,
     kubectl_manifest.serviceaccount,
     kubectl_manifest.db_migrate,
+    kubectl_manifest.localstack,
   ]
 }
 

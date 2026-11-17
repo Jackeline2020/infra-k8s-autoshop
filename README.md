@@ -122,31 +122,48 @@ saúde dos 3 serviços (tempo de resposta, volume, taxa de erro) e alertas
 de falha no processamento, Saga cancelada por prazo e taxa de erro, com
 notificação por e-mail.
 
-O monitoramento do cluster usa o `nri-bundle` do New Relic, instalado por
-Helm depois que o cluster existe.
+## Componentes instalados por Helm
+
+Depois que o cluster existe, dois componentes são instalados por Helm:
+
+```bash
+# metrics-server: CPU e memória dos pods, usados pelo HPA do OS Service
+helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+helm upgrade --install metrics-server metrics-server/metrics-server -n kube-system
+
+# nri-bundle: monitoramento do cluster e envio dos logs dos pods ao New Relic
+helm repo add newrelic https://helm-charts.newrelic.com
+helm upgrade --install newrelic-bundle newrelic/nri-bundle \
+  --namespace newrelic --create-namespace \
+  --set global.licenseKey=<license key> --set global.cluster=autoshop-eks \
+  --set newrelic-infrastructure.privileged=true --set ksm.enabled=true \
+  --set kubeEvents.enabled=true --set logging.enabled=true
+```
 
 ## Ambientes kind (local e homologação)
 
 - **`infra/local`**: cluster kind na máquina, sem custo.
-- **`infra/ci`**: cluster kind efêmero dentro do runner do GitHub Actions,
-  disparado pelo `app-autoshop` a cada publicação na `develop`
-  (homologação com smoke test).
-
-Os dois foram criados na Fase 3, com o app como único serviço. Na Fase 4,
-o app passou a depender das filas da Saga; o ambiente de produção é o EKS.
+- **`infra/ci`**: homologação do OS Service. Cluster kind efêmero dentro
+  do runner do GitHub Actions, com PostgreSQL, LocalStack (filas da Saga)
+  e todas as migrations do `app-autoshop`, disparado pelo `app-autoshop` a
+  cada publicação na `develop`. Termina com o smoke test (`/health`).
 
 ## Pipeline (`.github/workflows/ci-cd.yml`)
 
 1. **terraform-validate**: valida o Terraform de `infra/ci`, `infra/aws` e
    `observability` em todo pull request.
-2. **deploy-local**: homologação no kind, disparada pelo `app-autoshop`.
-3. **deploy-aws**: aplica `infra/aws` pelo pipeline, habilitado pela
-   variável `AWS_DEPLOY_ENABLED`. Fica desligado: sem state remoto, a infra
-   da AWS é aplicada a partir da máquina de quem administra o ambiente.
+2. **Deploy Homologação**: homologação no kind (`infra/ci`), disparada pelo
+   `app-autoshop` ou manualmente, informando a imagem.
+3. **Provisionar Cluster EKS**: aplica `infra/aws` pelo pipeline, habilitado
+   pela variável `AWS_DEPLOY_ENABLED`. Fica desligado neste repositório:
+   sem state remoto, a infra da AWS é aplicada a partir da máquina de quem
+   administra o ambiente.
 
 ## Tecnologias
 
 - Terraform (providers `aws`, `kind`, `kubectl`, `helm`)
+- Helm (metrics-server e New Relic)
+- LocalStack (filas da Saga na homologação)
 - AWS: EKS, SQS, IAM (OIDC e IRSA)
 - Kubernetes (EKS; kind para local e homologação)
 - GitHub Actions

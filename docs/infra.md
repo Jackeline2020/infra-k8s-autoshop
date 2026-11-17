@@ -6,7 +6,7 @@ Três projetos Terraform independentes:
 |---|---|---|
 | `infra/aws/` | Cluster EKS, filas SQS da Saga, roles IAM dos serviços e do GitHub Actions | Produção (AWS) |
 | `infra/local/` | Cluster kind com Postgres e o app | Testes na máquina, sem custo |
-| `infra/ci/` | Igual ao `local/`, dentro do runner do GitHub Actions | Homologação da `develop` |
+| `infra/ci/` | Cluster kind com PostgreSQL, LocalStack (filas da Saga) e o app, dentro do runner do GitHub Actions | Homologação da `develop` do `app-autoshop` |
 
 Os bancos de dados dos serviços ficam no repositório
 [`infra-db-autoshop`](https://github.com/Jackeline2020/infra-db-autoshop),
@@ -48,15 +48,20 @@ merge `develop → main` em cada um.
 ### Destruir
 
 1. `kubectl delete namespace autoshop` (remove os Load Balancers, que não
-   estão no estado do Terraform)
+   estão no estado do Terraform) e `helm uninstall newrelic-bundle -n newrelic`
 2. `terraform destroy` nas stacks do `infra-db-autoshop`
 3. `terraform destroy` em `infra/aws`
 
 ## `infra/local/` e `infra/ci/`
 
-Cluster kind + namespace + Postgres dentro do cluster + Job de migration +
-metrics-server (só no local) + os manifestos do app, lidos do
-`app-autoshop` (pasta irmã no local; API do GitHub no CI).
+Cluster kind + namespace + PostgreSQL dentro do cluster + Job de migration
++ os manifestos do app, lidos do `app-autoshop` (pasta irmã no local; API
+do GitHub, branch `develop`, no CI).
+
+- **`infra/local/`** (Fase 3): instala também o metrics-server.
+- **`infra/ci/`**: sobe também o LocalStack com as filas da Saga e aplica
+  todas as migrations do app, em ordem. O pipeline espera o rollout e
+  chama o `/health`.
 
 ```bash
 cd infra/local
@@ -81,5 +86,6 @@ Problemas comuns:
   também permitiria aplicar a infra pelo pipeline.
 - **Rede:** VPC padrão da conta. Uma produção real usaria uma VPC dedicada,
   com subnets privadas para os nodes e os bancos.
-- **Exposição:** os serviços usam Load Balancers próprios. Uma produção
-  real usaria um Ingress ou um API Gateway na frente, com autorização.
+- **Exposição:** app, execution e billing usam Load Balancers próprios e
+  validam o JWT no próprio middleware; o mock de pagamento fica acessível
+  só dentro do cluster.

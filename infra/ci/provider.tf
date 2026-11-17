@@ -27,8 +27,8 @@ provider "kind" {}
 # contra a API do cluster recém-criado (comum no runner com poucos
 # recursos, quando vários kubectl_manifest tentam aplicar em paralelo).
 provider "kubectl" {
-  config_path        = kind_cluster.ci.kubeconfig_path
-  apply_retry_count  = 5
+  config_path       = kind_cluster.ci.kubeconfig_path
+  apply_retry_count = 5
 }
 
 provider "helm" {
